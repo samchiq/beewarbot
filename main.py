@@ -1,4 +1,5 @@
 import os
+import base64
 import time
 import logging
 import asyncio
@@ -13,10 +14,13 @@ load_dotenv()
 # ── Конфигурация ──────────────────────────────────────────────────────────────
 
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-WEBHOOK_URL        = os.getenv('WEBHOOK_URL')       # https://yourapp.onrender.com
+WEBHOOK_URL        = os.getenv('WEBHOOK_URL')
 PORT               = int(os.getenv('PORT', 10000))
 TARGET_LIKES       = int(os.getenv('TARGET_LIKES', 400_000))
 VIDEO_URL          = os.getenv('VIDEO_URL', 'https://www.youtube.com/watch?v=MddwBrh-9lU')
+YT_COOKIES_B64     = os.getenv('YT_COOKIES_B64', '').strip()  # base64 Netscape cookies
+
+COOKIES_FILE = '/tmp/yt_cookies.txt'
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -24,28 +28,53 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ── Инициализация куков ───────────────────────────────────────────────────────
+
+def setup_cookies() -> bool:
+    """
+    Декодирует YT_COOKIES_B64 и записывает в /tmp/yt_cookies.txt.
+    Возвращает True если файл готов, иначе False.
+
+    Как получить куки:
+      1. Установи расширение "Get cookies.txt LOCALLY" в Chrome/Firefox
+      2. Зайди на youtube.com под своим аккаунтом
+      3. Нажми расширение → Export → сохрани файл cookies.txt
+      4. Закодируй: base64 -w 0 cookies.txt   (Linux/Mac)
+                    certutil -encode cookies.txt tmp.b64 && findstr /v CERT tmp.b64  (Windows)
+      5. Вставь результат в переменную окружения YT_COOKIES_B64 на Render
+    """
+    if not YT_COOKIES_B64:
+        logger.warning("YT_COOKIES_B64 не задан — YouTube заблокирует запросы с серверных IP.")
+        return False
+    try:
+        with open(COOKIES_FILE, 'wb') as f:
+            f.write(base64.b64decode(YT_COOKIES_B64))
+        logger.info("Куки YouTube загружены из переменной окружения.")
+        return True
+    except Exception:
+        logger.exception("Не удалось записать файл куков.")
+        return False
+
+_cookies_ready = setup_cookies()
+
 # ── Кэш ──────────────────────────────────────────────────────────────────────
-# Вытягиваем данные не чаще раза в 90 секунд, чтобы YouTube нас не трогал.
 
 _cache: dict = {'likes': None, 'title': None, 'err': None, 'ts': 0.0}
-_CACHE_TTL = 3600  # секунд
+_CACHE_TTL = 3600  # секунд (1 час)
 
 # ── Получение лайков через yt-dlp ─────────────────────────────────────────────
 
 def _fetch_sync() -> tuple[int | None, str | None, str | None]:
-    """
-    Синхронная выборка — запускается в отдельном потоке через run_in_executor.
-    yt-dlp использует внутренний Innertube API YouTube — без API-ключей.
-    """
+    """Синхронная выборка — запускается в отдельном потоке."""
     try:
         opts = {
-            'quiet':       True,
-            'no_warnings': True,
+            'quiet':         True,
+            'no_warnings':   True,
             'skip_download': True,
-            # Отключаем всё лишнее — нужны только метаданные
-            'extract_flat': False,
-            'ignoreerrors': False,
         }
+        if _cookies_ready and os.path.exists(COOKIES_FILE):
+            opts['cookiefile'] = COOKIES_FILE
+
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(VIDEO_URL, download=False)
 
@@ -54,7 +83,6 @@ def _fetch_sync() -> tuple[int | None, str | None, str | None]:
 
         if likes is None:
             return None, title, "YouTube скрыл количество лайков для этого видео."
-
         return int(likes), title, None
 
     except yt_dlp.utils.DownloadError as e:
@@ -66,15 +94,13 @@ def _fetch_sync() -> tuple[int | None, str | None, str | None]:
 
 
 async def get_video_stats() -> tuple[int | None, str | None, str | None]:
-    """Возвращает (likes, title, error). Использует кэш 90 сек."""
+    """Возвращает (likes, title, error). Использует кэш 1 час."""
     now = time.monotonic()
     if _cache['ts'] and now - _cache['ts'] < _CACHE_TTL:
         return _cache['likes'], _cache['title'], _cache['err']
 
-    # Запускаем синхронный yt-dlp в пуле потоков, не блокируя event loop
     loop = asyncio.get_event_loop()
     likes, title, err = await loop.run_in_executor(None, _fetch_sync)
-
     _cache.update({'likes': likes, 'title': title, 'err': err, 'ts': time.monotonic()})
     return likes, title, err
 
@@ -82,14 +108,13 @@ async def get_video_stats() -> tuple[int | None, str | None, str | None]:
 # ── Форматирование ────────────────────────────────────────────────────────────
 
 def _fmt(n: int) -> str:
-    """1234567 → '1 234 567'"""
-    return f"{n:,}".replace(",", "\u202f")  # узкий неразрывный пробел
+    return f"{n:,}".replace(",", "\u202f")
 
 
 def build_message(likes: int, title: str) -> str:
     remaining = TARGET_LIKES - likes
     pct       = min(likes / TARGET_LIKES * 100, 100.0)
-    filled    = round(pct / 5)                     # 20 блоков = 100 %
+    filled    = round(pct / 5)
     bar       = "█" * filled + "░" * (20 - filled)
 
     if remaining <= 0:
@@ -141,7 +166,6 @@ async def inline_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ),
         )]
 
-    # Telegram кэширует результат per-user 60 сек — не дёргает нас лишний раз
     await update.inline_query.answer(results, cache_time=3600)
 
 
