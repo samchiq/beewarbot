@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # Вытягиваем данные не чаще раза в 90 секунд, чтобы YouTube нас не трогал.
 
 _cache: dict = {'likes': None, 'title': None, 'err': None, 'ts': 0.0}
-_CACHE_TTL = 90  # секунд
+_CACHE_TTL = 3600  # секунд
 
 # ── Получение лайков через yt-dlp ─────────────────────────────────────────────
 
@@ -142,7 +142,7 @@ async def inline_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )]
 
     # Telegram кэширует результат per-user 60 сек — не дёргает нас лишний раз
-    await update.inline_query.answer(results, cache_time=60)
+    await update.inline_query.answer(results, cache_time=3600)
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
