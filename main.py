@@ -1,5 +1,4 @@
 import os
-import base64
 import time
 import logging
 import asyncio
@@ -18,44 +17,12 @@ WEBHOOK_URL        = os.getenv('WEBHOOK_URL')
 PORT               = int(os.getenv('PORT', 10000))
 TARGET_LIKES       = int(os.getenv('TARGET_LIKES', 400_000))
 VIDEO_URL          = os.getenv('VIDEO_URL', 'https://www.youtube.com/watch?v=MddwBrh-9lU')
-YT_COOKIES_B64     = os.getenv('YT_COOKIES_B64', '').strip()  # base64 Netscape cookies
-
-COOKIES_FILE = '/tmp/yt_cookies.txt'
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
-# ── Инициализация куков ───────────────────────────────────────────────────────
-
-def setup_cookies() -> bool:
-    """
-    Декодирует YT_COOKIES_B64 и записывает в /tmp/yt_cookies.txt.
-    Возвращает True если файл готов, иначе False.
-
-    Как получить куки:
-      1. Установи расширение "Get cookies.txt LOCALLY" в Chrome/Firefox
-      2. Зайди на youtube.com под своим аккаунтом
-      3. Нажми расширение → Export → сохрани файл cookies.txt
-      4. Закодируй: base64 -w 0 cookies.txt   (Linux/Mac)
-                    certutil -encode cookies.txt tmp.b64 && findstr /v CERT tmp.b64  (Windows)
-      5. Вставь результат в переменную окружения YT_COOKIES_B64 на Render
-    """
-    if not YT_COOKIES_B64:
-        logger.warning("YT_COOKIES_B64 не задан — YouTube заблокирует запросы с серверных IP.")
-        return False
-    try:
-        with open(COOKIES_FILE, 'wb') as f:
-            f.write(base64.b64decode(YT_COOKIES_B64))
-        logger.info("Куки YouTube загружены из переменной окружения.")
-        return True
-    except Exception:
-        logger.exception("Не удалось записать файл куков.")
-        return False
-
-_cookies_ready = setup_cookies()
 
 # ── Кэш ──────────────────────────────────────────────────────────────────────
 
@@ -65,15 +32,24 @@ _CACHE_TTL = 3600  # секунд (1 час)
 # ── Получение лайков через yt-dlp ─────────────────────────────────────────────
 
 def _fetch_sync() -> tuple[int | None, str | None, str | None]:
-    """Синхронная выборка — запускается в отдельном потоке."""
+    """
+    Синхронная выборка — запускается в отдельном потоке.
+
+    Используем клиент android_vr для Innertube API YouTube: у него нет
+    проверки на бота, которая обычно блокирует запросы с серверных IP
+    (Render, Heroku и т.д.) при обычном web-клиенте. Куки не нужны.
+    """
     try:
         opts = {
             'quiet':         True,
             'no_warnings':   True,
             'skip_download': True,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android_vr'],
+                }
+            },
         }
-        if _cookies_ready and os.path.exists(COOKIES_FILE):
-            opts['cookiefile'] = COOKIES_FILE
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(VIDEO_URL, download=False)
