@@ -35,38 +35,50 @@ def _fetch_sync() -> tuple[int | None, str | None, str | None]:
     """
     Синхронная выборка — запускается в отдельном потоке.
 
-    Используем клиент android_vr для Innertube API YouTube: у него нет
-    проверки на бота, которая обычно блокирует запросы с серверных IP
-    (Render, Heroku и т.д.) при обычном web-клиенте. Куки не нужны.
+    Пробуем несколько Innertube-клиентов по очереди: если YouTube начинает
+    блокировать один (например android_vr), yt-dlp автоматически падает
+    на следующий в списке. Куки не нужны ни для одного из них.
     """
-    try:
-        opts = {
-            'quiet':         True,
-            'no_warnings':   True,
-            'skip_download': True,
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['android_vr'],
-                }
-            },
-        }
+    clients = ['android_vr', 'ios', 'android', 'web_safari']
+    last_err = None
 
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(VIDEO_URL, download=False)
+    for client in clients:
+        try:
+            opts = {
+                'quiet':         True,
+                'no_warnings':   True,
+                'skip_download': True,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': [client],
+                    }
+                },
+            }
 
-        title = info.get('title', 'Видео')
-        likes = info.get('like_count')
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(VIDEO_URL, download=False)
 
-        if likes is None:
-            return None, title, "YouTube скрыл количество лайков для этого видео."
-        return int(likes), title, None
+            title = info.get('title', 'Видео')
+            likes = info.get('like_count')
 
-    except yt_dlp.utils.DownloadError as e:
-        logger.error("yt-dlp DownloadError: %s", e)
-        return None, None, "Не удалось получить данные о видео."
-    except Exception:
-        logger.exception("_fetch_sync: неожиданная ошибка")
-        return None, None, "Внутренняя ошибка бота."
+            if likes is None:
+                return None, title, "YouTube скрыл количество лайков для этого видео."
+
+            logger.info("Успешно получены данные через клиент '%s'", client)
+            return int(likes), title, None
+
+        except yt_dlp.utils.DownloadError as e:
+            logger.warning("Клиент '%s' не сработал: %s", client, str(e)[:300])
+            last_err = e
+            continue
+        except Exception:
+            logger.exception("_fetch_sync: неожиданная ошибка с клиентом '%s'", client)
+            last_err = None
+            continue
+
+    if last_err:
+        logger.error("Все Innertube-клиенты не сработали. Последняя ошибка: %s", last_err)
+    return None, None, "Не удалось получить данные о видео (YouTube заблокировал запрос)."
 
 
 async def get_video_stats() -> tuple[int | None, str | None, str | None]:
